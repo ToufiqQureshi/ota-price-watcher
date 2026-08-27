@@ -41,7 +41,8 @@ export class PriceService {
     const previous = await this.latestForSession(session.id);
     const previousByKey = new Map(previous.map((p) => [`${p.roomType}::${p.stayDate}`, p]));
 
-    const scraped = await this.engine.scrapePrices(session.id);
+    const siteConfig = this.sessionService.parseSiteConfig(session);
+    const scraped = await this.engine.scrapePrices(session.id, session.siteType, siteConfig);
     const saved: RoomPriceEntity[] = [];
 
     for (const room of scraped) {

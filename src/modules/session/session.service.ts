@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { HotelSessionEntity } from '../../database/entities/hotel-session.entity';
 import { decrypt, encrypt } from '../../common/crypto.util';
+import { AdapterRegistryService } from '../engine/adapter-registry.service';
 import { EngineService } from '../engine/engine.service';
 
 @Injectable()
@@ -12,6 +13,7 @@ export class SessionService {
     @InjectRepository(HotelSessionEntity)
     private readonly sessions: Repository<HotelSessionEntity>,
     private readonly engine: EngineService,
+    private readonly adapters: AdapterRegistryService,
     private readonly config: ConfigService,
   ) {}
 
@@ -29,21 +31,40 @@ export class SessionService {
     return session;
   }
 
-  async create(hotelName: string, username: string, password: string): Promise<HotelSessionEntity> {
+  async create(
+    hotelName: string,
+    siteType: string,
+    siteConfig: Record<string, unknown> | undefined,
+    username?: string,
+    password?: string,
+  ): Promise<HotelSessionEntity> {
+    const adapter = this.adapters.get(siteType); // throws NotFoundException for unknown siteType
+    if (adapter.requiresLogin && (!username || !password)) {
+      throw new BadRequestException(`siteType "${siteType}" requires username and password`);
+    }
+
     let session = this.sessions.create({
       hotelName,
-      gommtUsernameEncrypted: encrypt(username, this.key),
-      gommtPasswordEncrypted: encrypt(password, this.key),
+      siteType,
+      siteConfig: siteConfig ? JSON.stringify(siteConfig) : null,
+      usernameEncrypted: username ? encrypt(username, this.key) : null,
+      passwordEncrypted: password ? encrypt(password, this.key) : null,
       status: 'pending_otp',
     });
     session = await this.sessions.save(session);
 
-    const result = await this.engine.startLogin(session.id, username, password);
+    const result = await this.engine.startSession(
+      session.id,
+      siteType,
+      siteConfig ?? {},
+      adapter.requiresLogin ? { username: username!, password: password! } : undefined,
+    );
+
     if (result.status === 'login_failed') {
       session.status = 'login_failed';
       session.lastError = result.error ?? null;
     } else if (result.status === 'active') {
-      // A reused storage state can skip the OTP step entirely.
+      // Public sites, or a reused storage state that skipped the OTP step entirely.
       const state = await this.engine.saveStorageState(session.id);
       session.browserStateEncrypted = state ? encrypt(state, this.key) : null;
       session.status = 'active';
@@ -61,7 +82,7 @@ export class SessionService {
       throw new BadRequestException(`Session ${id} is not awaiting an OTP (status: ${session.status})`);
     }
 
-    const result = await this.engine.submitOtp(id, otp);
+    const result = await this.engine.submitOtp(id, session.siteType, otp);
     if (result.status === 'active') {
       const state = await this.engine.saveStorageState(id);
       session.browserStateEncrypted = state ? encrypt(state, this.key) : null;
@@ -75,15 +96,20 @@ export class SessionService {
     return this.sessions.save(session);
   }
 
-  decryptCredentials(session: HotelSessionEntity): { username: string; password: string } {
+  decryptCredentials(session: HotelSessionEntity): { username: string; password: string } | null {
+    if (!session.usernameEncrypted || !session.passwordEncrypted) return null;
     return {
-      username: decrypt(session.gommtUsernameEncrypted, this.key),
-      password: decrypt(session.gommtPasswordEncrypted, this.key),
+      username: decrypt(session.usernameEncrypted, this.key),
+      password: decrypt(session.passwordEncrypted, this.key),
     };
   }
 
   decryptStorageState(session: HotelSessionEntity): string | undefined {
     return session.browserStateEncrypted ? decrypt(session.browserStateEncrypted, this.key) : undefined;
+  }
+
+  parseSiteConfig(session: HotelSessionEntity): Record<string, unknown> {
+    return session.siteConfig ? JSON.parse(session.siteConfig) : {};
   }
 
   async remove(id: string): Promise<void> {

@@ -17,11 +17,12 @@ export class SessionController {
     return this.sessionService.findOrThrow(id);
   }
 
-  // Hotelier submits their own GoMMT username/password here. We hold it only
-  // long enough to drive the login; it is stored encrypted at rest.
+  // For login-gated sites (e.g. "gommt") the hotelier submits their own credentials
+  // here; they're held only long enough to drive the login and stored encrypted at
+  // rest. Public sites (e.g. "swiftbook") only need siteConfig, no credentials.
   @Post()
   create(@Body() dto: CreateSessionDto) {
-    return this.sessionService.create(dto.hotelName, dto.gommtUsername, dto.gommtPassword);
+    return this.sessionService.create(dto.hotelName, dto.siteType, dto.siteConfig, dto.username, dto.password);
   }
 
   @Post(':id/otp')

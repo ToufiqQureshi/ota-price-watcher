@@ -1,25 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Browser, BrowserContext, chromium } from 'playwright';
-import { GOMMT_SELECTORS } from '../../config/gommt-selectors';
-
-export interface ScrapedRoomPrice {
-  roomType: string;
-  stayDate: string;
-  price: number;
-  soldOut: boolean;
-}
-
-export interface LoginResult {
-  status: 'otp_required' | 'active' | 'login_failed';
-  error?: string;
-}
+import { AdapterRegistryService } from './adapter-registry.service';
+import { AdapterResult, ScrapedRoomPrice } from './site-adapter.interface';
 
 /**
- * Owns the one browser context per hotel session — mirrors OpenWA's engine layer,
- * which drives whatsapp-web.js/baileys instead of GoMMT Extranet. One context is kept
- * alive per active session and reused for polling, so we pay the login cost once and
- * every subsequent scrape is a lightweight navigation, not a fresh login.
+ * Owns the one browser context per watched session — mirrors OpenWA's engine layer,
+ * which drives whatsapp-web.js/baileys instead of a hotel booking site. This class is
+ * site-agnostic: it manages browser/context/page lifecycle and delegates every
+ * site-specific step (URLs, selectors, whether login is even required) to whichever
+ * SiteAdapter matches the session's siteType. One context is kept alive per active
+ * session and reused for polling, so login (where required) happens once.
  */
 @Injectable()
 export class EngineService {
@@ -27,7 +18,10 @@ export class EngineService {
   private browser: Browser | null = null;
   private readonly contexts = new Map<string, BrowserContext>();
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly adapters: AdapterRegistryService,
+  ) {}
 
   private async getBrowser(): Promise<Browser> {
     if (!this.browser) {
@@ -38,55 +32,50 @@ export class EngineService {
     return this.browser;
   }
 
-  async startLogin(
-    sessionId: string,
-    username: string,
-    password: string,
-    storageState?: string,
-  ): Promise<LoginResult> {
-    const browser = await this.getBrowser();
-    const context = await browser.newContext(
-      storageState ? { storageState: JSON.parse(storageState) } : {},
-    );
-    this.contexts.set(sessionId, context);
-    const page = await context.newPage();
-
-    try {
-      await page.goto(GOMMT_SELECTORS.loginUrl, { waitUntil: 'domcontentloaded' });
-
-      // Already-valid storage state may skip the login form entirely.
-      const alreadyIn = await page
-        .locator(GOMMT_SELECTORS.postLoginSelector)
-        .isVisible()
-        .catch(() => false);
-      if (alreadyIn) return { status: 'active' };
-
-      await page.fill(GOMMT_SELECTORS.usernameInput, username);
-      await page.fill(GOMMT_SELECTORS.passwordInput, password);
-      await page.click(GOMMT_SELECTORS.loginSubmitButton);
-
-      await page.waitForSelector(GOMMT_SELECTORS.otpInput, { timeout: 15000 });
-      return { status: 'otp_required' };
-    } catch (err) {
-      this.logger.error(`Login failed for session ${sessionId}: ${(err as Error).message}`);
-      return { status: 'login_failed', error: (err as Error).message };
+  private async getOrCreateContext(sessionId: string, storageState?: string): Promise<BrowserContext> {
+    let context = this.contexts.get(sessionId);
+    if (!context) {
+      const browser = await this.getBrowser();
+      context = await browser.newContext(storageState ? { storageState: JSON.parse(storageState) } : {});
+      this.contexts.set(sessionId, context);
     }
+    return context;
   }
 
-  async submitOtp(sessionId: string, otp: string): Promise<LoginResult> {
-    const context = this.contexts.get(sessionId);
-    if (!context) return { status: 'login_failed', error: 'No active login context for session' };
+  /**
+   * Starts a session for a given site: for login-required sites this drives the login
+   * form (and returns 'otp_required' if a follow-up OTP step is needed); for public
+   * sites this just opens the property's page and confirms it loaded.
+   */
+  async startSession(
+    sessionId: string,
+    siteType: string,
+    siteConfig: Record<string, unknown>,
+    credentials?: { username: string; password: string },
+    storageState?: string,
+  ): Promise<AdapterResult> {
+    const adapter = this.adapters.get(siteType);
+    const context = await this.getOrCreateContext(sessionId, storageState);
     const page = context.pages()[0] ?? (await context.newPage());
 
-    try {
-      await page.fill(GOMMT_SELECTORS.otpInput, otp);
-      await page.click(GOMMT_SELECTORS.otpSubmitButton);
-      await page.waitForSelector(GOMMT_SELECTORS.postLoginSelector, { timeout: 15000 });
-      return { status: 'active' };
-    } catch (err) {
-      this.logger.error(`OTP submit failed for session ${sessionId}: ${(err as Error).message}`);
-      return { status: 'login_failed', error: (err as Error).message };
+    if (!adapter.requiresLogin) {
+      if (!adapter.open) throw new Error(`Adapter ${siteType} has no open() but requiresLogin=false`);
+      return adapter.open(page, siteConfig);
     }
+    if (!adapter.login || !credentials) {
+      return { status: 'login_failed', error: `${siteType} requires credentials` };
+    }
+    return adapter.login(page, siteConfig, credentials.username, credentials.password);
+  }
+
+  async submitOtp(sessionId: string, siteType: string, otp: string): Promise<AdapterResult> {
+    const adapter = this.adapters.get(siteType);
+    const context = this.contexts.get(sessionId);
+    if (!context) return { status: 'login_failed', error: 'No active browser context for session' };
+    if (!adapter.submitOtp) return { status: 'login_failed', error: `${siteType} has no OTP step` };
+
+    const page = context.pages()[0] ?? (await context.newPage());
+    return adapter.submitOtp(page, otp);
   }
 
   async saveStorageState(sessionId: string): Promise<string | null> {
@@ -96,32 +85,16 @@ export class EngineService {
     return JSON.stringify(state);
   }
 
-  async scrapePrices(sessionId: string): Promise<ScrapedRoomPrice[]> {
+  async scrapePrices(
+    sessionId: string,
+    siteType: string,
+    siteConfig: Record<string, unknown>,
+  ): Promise<ScrapedRoomPrice[]> {
+    const adapter = this.adapters.get(siteType);
     const context = this.contexts.get(sessionId);
     if (!context) throw new Error(`No active browser context for session ${sessionId}`);
     const page = context.pages()[0] ?? (await context.newPage());
-
-    await page.goto(GOMMT_SELECTORS.ratesInventoryUrl, { waitUntil: 'domcontentloaded' });
-    const rows = page.locator(GOMMT_SELECTORS.roomRow);
-    const count = await rows.count();
-    const results: ScrapedRoomPrice[] = [];
-
-    for (let i = 0; i < count; i++) {
-      const row = rows.nth(i);
-      const roomType = (await row.locator(GOMMT_SELECTORS.roomTypeLabel).textContent()) ?? '';
-      const priceText = (await row.locator(GOMMT_SELECTORS.roomPriceValue).textContent()) ?? '0';
-      const soldOut = await row.locator(GOMMT_SELECTORS.roomSoldOutBadge).isVisible().catch(() => false);
-      const stayDate = (await row.getAttribute('data-stay-date')) ?? '';
-
-      results.push({
-        roomType: roomType.trim(),
-        stayDate,
-        price: Number(priceText.replace(/[^\d.]/g, '')) || 0,
-        soldOut,
-      });
-    }
-
-    return results;
+    return adapter.scrapePrices(page, siteConfig);
   }
 
   async closeSession(sessionId: string): Promise<void> {

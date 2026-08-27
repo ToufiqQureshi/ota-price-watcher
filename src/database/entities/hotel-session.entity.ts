@@ -2,6 +2,7 @@ import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateCol
 
 export type HotelSessionStatus = 'pending_otp' | 'active' | 'expired' | 'login_failed';
 
+/** One row = one property being watched on one site (GoMMT, Swiftbook, ...). */
 @Entity('hotel_sessions')
 export class HotelSessionEntity {
   @PrimaryGeneratedColumn('uuid')
@@ -10,11 +11,20 @@ export class HotelSessionEntity {
   @Column()
   hotelName: string;
 
-  @Column()
-  gommtUsernameEncrypted: string;
+  /** Matches a registered SiteAdapter's siteType, e.g. "gommt" or "swiftbook". */
+  @Column({ default: 'gommt' })
+  siteType: string;
 
-  @Column()
-  gommtPasswordEncrypted: string;
+  /** Adapter-specific config (propertyId, roomIds, checkIn/checkOut, ...) as JSON. */
+  @Column({ type: 'text', nullable: true })
+  siteConfig: string | null;
+
+  /** Only sites whose adapter has requiresLogin=true need these. */
+  @Column({ type: 'text', nullable: true })
+  usernameEncrypted: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  passwordEncrypted: string | null;
 
   @Column({ type: 'text', nullable: true })
   browserStateEncrypted: string | null;
