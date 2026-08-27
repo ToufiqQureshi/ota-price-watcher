@@ -16,10 +16,11 @@ DOM selectors, whether login is even required — lives in a small
 adapter; nothing else in the engine, session, price, or webhook modules
 changes.
 
-| Site        | `siteType`   | Needs login?                         | Risk profile                                                    |
-| ----------- | ------------ | ------------------------------------- | ----------------------------------------------------------------- |
-| GoMMT       | `gommt`      | Yes — hotelier credentials + OTP      | Real account-restriction risk (see disclaimer below)              |
-| Swiftbook   | `swiftbook`  | No — public booking widget, URL-only  | Lower — no account to restrict, but still automated scraping      |
+| Site        | `siteType`   | Needs login?                              | Risk profile                                                    |
+| ----------- | ------------ | -------------------------------------------- | ----------------------------------------------------------------- |
+| GoMMT       | `gommt`      | Yes — hotelier credentials, OTP if prompted  | Real account-restriction risk (see disclaimer below)              |
+| STAAH       | `staah`      | Yes — hotelier credentials, OTP if prompted  | Real account-restriction risk — this is their main channel manager, watch it most carefully |
+| Swiftbook   | `swiftbook`  | No — public booking widget, URL-only         | Lower — no account to restrict, but still automated scraping      |
 
 ## ⚠️ Read this before pointing it at a real property
 
@@ -43,11 +44,16 @@ changes.
 1. **`POST /sessions`** — register a property to watch:
    - `{ hotelName, siteType: "gommt", username, password }` — logs in via
      the GoMMT adapter.
+   - `{ hotelName, siteType: "staah", username, password, siteConfig: { propertyId } }`
+     — logs into the STAAH superadmin dashboard, then that property's rates page.
    - `{ hotelName, siteType: "swiftbook", siteConfig: { baseUrl, propertyId, roomIds } }`
      — no credentials needed, just opens the public widget.
-2. **`POST /sessions/:id/otp`** — only for login-required sites (GoMMT):
-   submit the OTP to complete login. The browser's session state (cookies)
-   is then saved, encrypted, so future polls don't need to log in again.
+2. **`POST /sessions/:id/otp`** — only if the login step actually hit an OTP
+   prompt (`status` came back `"pending_otp"` — GoMMT and STAAH both race the
+   OTP field against the logged-in dashboard, since not every account gets
+   prompted): submit the OTP to complete login. The browser's session state
+   (cookies) is then saved, encrypted, so future polls don't need to log in
+   again.
 3. **`PUT /sessions/:id/webhook`** — point this session at wherever prices
    should be pushed (`targetUrl` + a shared `secret` for HMAC signing).
 4. A background poller (`POLL_INTERVAL_MS`, default 60s) reuses the same
@@ -72,13 +78,14 @@ and `WebhookService` never need to know a new site exists.
 
 ## Before this works against a real property
 
-Every selector in `src/config/gommt-selectors.ts` and
-`src/config/swiftbook-selectors.ts` is a **placeholder** — this environment
-couldn't reach either site to inspect the real DOM (network policy blocked
-`swiftbook.io`, and GoMMT needs a real hotelier login to even see the
-dashboard). Open the real site in a browser, inspect the login form/OTP
-field/room-price elements, and replace the placeholders. Those two files are
-the only place to update when a site changes its frontend.
+Every selector in `src/config/gommt-selectors.ts`,
+`src/config/staah-selectors.ts`, and `src/config/swiftbook-selectors.ts` is a
+**placeholder** — this environment's network policy blocked all three
+domains (`swiftbook.io`, `v2.staah.net`), and GoMMT/STAAH need a real
+hotelier login to even see the dashboard. Open the real site in a browser,
+inspect the login form/OTP field/room-price elements, and replace the
+placeholders. Those files are the only place to update when a site changes
+its frontend.
 
 ## Setup
 

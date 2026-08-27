@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { GommtAdapter } from './adapters/gommt.adapter';
+import { StaahAdapter } from './adapters/staah.adapter';
 import { SwiftbookAdapter } from './adapters/swiftbook.adapter';
 import { SiteAdapter } from './site-adapter.interface';
 
@@ -7,10 +8,11 @@ import { SiteAdapter } from './site-adapter.interface';
 export class AdapterRegistryService {
   private readonly adapters: Map<string, SiteAdapter>;
 
-  constructor(gommt: GommtAdapter, swiftbook: SwiftbookAdapter) {
+  constructor(gommt: GommtAdapter, swiftbook: SwiftbookAdapter, staah: StaahAdapter) {
     this.adapters = new Map<string, SiteAdapter>([
       [gommt.siteType, gommt],
       [swiftbook.siteType, swiftbook],
+      [staah.siteType, staah],
     ]);
   }
 

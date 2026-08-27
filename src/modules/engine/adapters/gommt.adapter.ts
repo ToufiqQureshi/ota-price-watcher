@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Page } from 'playwright';
 import { GOMMT_SELECTORS } from '../../../config/gommt-selectors';
+import { waitForEitherSelector } from '../../../common/wait-for-either.util';
 import { AdapterResult, ScrapedRoomPrice, SiteAdapter } from '../site-adapter.interface';
 
 /**
@@ -28,8 +29,12 @@ export class GommtAdapter implements SiteAdapter {
       await page.fill(GOMMT_SELECTORS.passwordInput, password);
       await page.click(GOMMT_SELECTORS.loginSubmitButton);
 
-      await page.waitForSelector(GOMMT_SELECTORS.otpInput, { timeout: 15000 });
-      return { status: 'otp_required' };
+      const matched = await waitForEitherSelector(
+        page,
+        [GOMMT_SELECTORS.otpInput, GOMMT_SELECTORS.postLoginSelector],
+        15000,
+      );
+      return { status: matched === 0 ? 'otp_required' : 'active' };
     } catch (err) {
       this.logger.error(`Login failed: ${(err as Error).message}`);
       return { status: 'login_failed', error: (err as Error).message };
